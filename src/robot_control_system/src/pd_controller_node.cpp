@@ -40,8 +40,9 @@ public:
         std::string output_topic = "/velocity_command/" + joint_name_;
 
         // Message filter subscribers
-        desired_sub_.subscribe(this, desired_topic);
-        current_sub_.subscribe(this, current_topic);
+        auto qos = rclcpp::QoS(10);
+        desired_sub_.subscribe(this, desired_topic, qos);
+        current_sub_.subscribe(this, current_topic, qos);
 
         // Synchronizer with adaptive queue size based on control frequency
         sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(

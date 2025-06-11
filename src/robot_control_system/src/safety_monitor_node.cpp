@@ -19,7 +19,7 @@ public:
         this->declare_parameter<double>("min_temperature", -20.0);  // celsius
         this->declare_parameter<double>("max_velocity", 4000.0);  // units
         this->declare_parameter<double>("watchdog_timeout", 0.5);  // seconds
-        this->declare_parameter<std::vector<std::string>>("joints", {});
+        this->declare_parameter<std::vector<std::string>>("joints", std::vector<std::string>{});
         this->declare_parameter<bool>("auto_reset", false);
         this->declare_parameter<double>("reset_delay", 2.0);  // seconds
 

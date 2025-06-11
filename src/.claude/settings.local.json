@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:robotics.stackexchange.com)",
+      "Bash(colcon build:*)"
+    ],
+    "deny": []
+  }
+}
