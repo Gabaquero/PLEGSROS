@@ -14,6 +14,12 @@
 #include <mutex>
 #include <condition_variable>
 #include <cmath>  // Added for M_PI
+#include <stdexcept>
+#include <unistd.h>
+#include <cerrno>
+#include <sched.h>
+#include <pthread.h>
+#include <sys/mman.h>
 
 class ReceptionNode : public rclcpp::Node
 {
@@ -42,26 +48,52 @@ public:
     can_interface_ = this->get_parameter("can_interface").as_string();
     timeout_seconds_ = this->get_parameter("timeout_seconds").as_double();
     
-    // Check if this joint needs position inversion
-    bool invert = this->get_parameter("invert_position").as_bool();
-    if (!invert) {
-      // Legacy behavior - specific joints are inverted
-      invert_position_ = (joint_name_ == "right_hip" || 
-                         joint_name_ == "right_ankle" || 
-                         joint_name_ == "left_knee");
-    } else {
-      invert_position_ = true;
+    // Validate parameters
+    if (joint_name_ == "undefined_joint") {
+      RCLCPP_ERROR(this->get_logger(), "joint_name parameter must be set");
+      throw std::runtime_error("Invalid joint_name parameter");
     }
+    if (can_id_ <= 0 || can_id_ > 0x7FF) {
+      RCLCPP_ERROR(this->get_logger(), "can_id must be between 0x001 and 0x7FF, got: 0x%03X", can_id_);
+      throw std::runtime_error("Invalid can_id parameter");
+    }
+    if (position_limits_.size() != 2 || position_limits_[0] >= position_limits_[1]) {
+      RCLCPP_ERROR(this->get_logger(), "position_limits must have 2 elements with min < max");
+      throw std::runtime_error("Invalid position_limits parameter");
+    }
+    if (current_limits_.size() != 2 || current_limits_[0] >= current_limits_[1]) {
+      RCLCPP_ERROR(this->get_logger(), "current_limits must have 2 elements with min < max");
+      throw std::runtime_error("Invalid current_limits parameter");
+    }
+    if (velocity_limits_.size() != 2 || velocity_limits_[0] >= velocity_limits_[1]) {
+      RCLCPP_ERROR(this->get_logger(), "velocity_limits must have 2 elements with min < max");
+      throw std::runtime_error("Invalid velocity_limits parameter");
+    }
+    if (temperature_limits_.size() != 2 || temperature_limits_[0] >= temperature_limits_[1]) {
+      RCLCPP_ERROR(this->get_logger(), "temperature_limits must have 2 elements with min < max");
+      throw std::runtime_error("Invalid temperature_limits parameter");
+    }
+    if (timeout_seconds_ <= 0.0 || timeout_seconds_ > 10.0) {
+      RCLCPP_ERROR(this->get_logger(), "timeout_seconds must be between 0.0 and 10.0, got: %.3f", timeout_seconds_);
+      throw std::runtime_error("Invalid timeout_seconds parameter");
+    }
+    if (can_interface_.empty()) {
+      RCLCPP_ERROR(this->get_logger(), "can_interface parameter cannot be empty");
+      throw std::runtime_error("Invalid can_interface parameter");
+    }
+    
+    // Get position inversion from parameter
+    invert_position_ = this->get_parameter("invert_position").as_bool();
 
     // Publishers
     pub_position_ = this->create_publisher<custom_msgs::msg::Float64Stamped>(
-      "joint_position/" + joint_name_, 10);
+      "/joint_position/" + joint_name_, 10);
     pub_current_ = this->create_publisher<custom_msgs::msg::Float64Stamped>(
-      "joint_current/" + joint_name_, 10);
+      "/joint_current/" + joint_name_, 10);
     pub_velocity_ = this->create_publisher<custom_msgs::msg::Float64Stamped>(
-      "joint_velocity/" + joint_name_, 10);
+      "/joint_velocity/" + joint_name_, 10);
     pub_temperature_ = this->create_publisher<custom_msgs::msg::Float64Stamped>(
-      "joint_temperature/" + joint_name_, 10);
+      "/joint_temperature/" + joint_name_, 10);
 
     // Initialize CAN or simulation
     if (!use_simulated_data_) {
@@ -76,9 +108,9 @@ public:
       }
     }
 
-    // Publishing timer
+    // High-performance timer optimized for RPi4
     timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(2),  // 500Hz
+      std::chrono::microseconds(2000),  // 500Hz with microsecond precision
       std::bind(&ReceptionNode::publishData, this)
     );
 
@@ -105,12 +137,14 @@ public:
 
 private:
   // Data structure for CAN data - moved before its usage
-  struct CANData {
+  // ARM-optimized data structure with proper alignment
+  struct alignas(64) CANData {  // 64-byte alignment for cache line optimization
     rclcpp::Time timestamp;
     uint16_t raw_position;
     uint16_t raw_current;
     uint16_t raw_velocity;
     uint16_t raw_temperature;
+    uint32_t padding[12];  // Pad to cache line boundary for ARM
   };
 
   bool initializeCANSocket()
@@ -124,7 +158,9 @@ private:
 
     // Get interface index
     struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));  // Zero the structure
     strncpy(ifr.ifr_name, can_interface_.c_str(), IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';  // Ensure null termination
     if (ioctl(can_socket_, SIOCGIFINDEX, &ifr) < 0) {
       RCLCPP_ERROR(this->get_logger(), "Failed to get index for %s: %s", 
         can_interface_.c_str(), strerror(errno));
@@ -158,9 +194,19 @@ private:
         strerror(errno));
     }
 
-    // Set socket to non-blocking for timeout handling
+    // Optimize socket for RPi4 performance
     int flags = fcntl(can_socket_, F_GETFL, 0);
-    fcntl(can_socket_, F_SETFL, flags | O_NONBLOCK);  // Fixed typo: O_NONBLOCK
+    fcntl(can_socket_, F_SETFL, flags | O_NONBLOCK);
+    
+    // Set socket buffer sizes for burst performance
+    int rx_buffer = 65536;  // 64KB receive buffer
+    int tx_buffer = 32768;  // 32KB transmit buffer
+    setsockopt(can_socket_, SOL_SOCKET, SO_RCVBUF, &rx_buffer, sizeof(rx_buffer));
+    setsockopt(can_socket_, SOL_SOCKET, SO_SNDBUF, &tx_buffer, sizeof(tx_buffer));
+    
+    // Enable socket timestamping for precise timing
+    int timestamp = 1;
+    setsockopt(can_socket_, SOL_SOCKET, SO_TIMESTAMP, &timestamp, sizeof(timestamp));
 
     return true;
   }
@@ -226,14 +272,23 @@ private:
     CANData data;
     bool has_data = false;
 
+    rclcpp::Time now = this->now();
+    
     if (!use_simulated_data_) {
       // Get latest real CAN data
-      std::lock_guard<std::mutex> lock(data_mutex_);
-      if (!can_data_queue_.empty()) {
-        data = can_data_queue_.front();
-        can_data_queue_.pop();
-        has_data = true;
-        last_data_time_ = this->now();
+      {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        if (!can_data_queue_.empty()) {
+          data = can_data_queue_.front();
+          can_data_queue_.pop();
+          has_data = true;
+        }
+      }
+      
+      // Update last data time with state lock
+      if (has_data) {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        last_data_time_ = now;
       }
     } else {
       // Generate simulated data
@@ -241,21 +296,24 @@ private:
       has_data = true;
     }
 
-    // Check for timeout
-    if (!use_simulated_data_ && (this->now() - last_data_time_).seconds() > timeout_seconds_) {
-      if (!timeout_warned_) {
-        RCLCPP_WARN(this->get_logger(), 
-          "[%s] No CAN data received for %.1f seconds", 
-          joint_name_.c_str(), timeout_seconds_);
-        timeout_warned_ = true;
+    // Check for timeout with state lock
+    if (!use_simulated_data_) {
+      std::lock_guard<std::mutex> state_lock(state_mutex_);
+      if ((now - last_data_time_).seconds() > timeout_seconds_) {
+        if (!timeout_warned_) {
+          RCLCPP_WARN(this->get_logger(), 
+            "[%s] No CAN data received for %.1f seconds", 
+            joint_name_.c_str(), timeout_seconds_);
+          timeout_warned_ = true;
+        }
+        // Use last known values or safe defaults
+        if (!has_data) {
+          data = last_valid_data_;
+          data.timestamp = now;
+        }
+      } else {
+        timeout_warned_ = false;
       }
-      // Use last known values or safe defaults
-      if (!has_data) {
-        data = last_valid_data_;
-        data.timestamp = this->now();
-      }
-    } else {
-      timeout_warned_ = false;
     }
 
     if (has_data) {
@@ -277,10 +335,13 @@ private:
       publishValue(pub_temperature_, temperature, data.timestamp);
 
       // Store as last valid data
-      last_valid_data_ = data;
+      {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        last_valid_data_ = data;
+      }
 
-      // Periodic logging
-      if (++log_counter_ % 500 == 0) {  // Every second at 500Hz
+      // Periodic logging - reduced frequency for performance
+      if (++log_counter_ % 2500 == 0) {  // Every 5 seconds at 500Hz
         RCLCPP_INFO(this->get_logger(), 
           "[%s] Pos: %.1f° | Curr: %.2fA | Vel: %.1f | Temp: %.1f°C",
           joint_name_.c_str(), position, current, velocity, temperature);
@@ -345,7 +406,8 @@ private:
   std::mutex data_mutex_;
   std::condition_variable cv_;
   
-  // State tracking
+  // State tracking (protected by state_mutex_)
+  mutable std::mutex state_mutex_;
   rclcpp::Time last_data_time_;
   CANData last_valid_data_;
   bool timeout_warned_ = false;
@@ -363,10 +425,36 @@ int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);
   
-  // Set real-time priority
-  struct sched_param param;
-  param.sched_priority = 70;  // Lower than PD controller
-  sched_setscheduler(0, SCHED_FIFO, &param);
+  // Optimize for Raspberry Pi 4 I/O performance
+  if (getuid() == 0) {
+    // Lock memory for RT performance
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
+      RCLCPP_WARN(rclcpp::get_logger("reception_node"), 
+        "Failed to lock memory (errno: %d)", errno);
+    }
+    
+    // Set CPU affinity to core 1 (I/O operations)
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(1, &cpuset);  // Use core 1 for reception nodes
+    
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0) {
+      RCLCPP_WARN(rclcpp::get_logger("reception_node"), "Failed to set CPU affinity");
+    } else {
+      RCLCPP_INFO(rclcpp::get_logger("reception_node"), "CPU affinity set to core 1");
+    }
+    
+    // Set real-time priority (lower than PD controller)
+    struct sched_param param;
+    param.sched_priority = 40;  // Lower for RPi4 stability
+    if (sched_setscheduler(0, SCHED_FIFO, &param) == -1) {
+      RCLCPP_WARN(rclcpp::get_logger("reception_node"), 
+        "Failed to set real-time priority (errno: %d)", errno);
+    } else {
+      RCLCPP_INFO(rclcpp::get_logger("reception_node"), 
+        "Real-time priority set successfully (priority: %d)", param.sched_priority);
+    }
+  }
   
   auto node = std::make_shared<ReceptionNode>();
   rclcpp::spin(node);

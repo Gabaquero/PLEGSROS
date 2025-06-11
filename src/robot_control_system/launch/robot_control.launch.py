@@ -103,8 +103,8 @@ def generate_launch_description():
     # Trajectory publisher node
     trajectory_node = Node(
         package='robot_control_system',
-        executable='trajectory_publisher',
-        name='trajectory_publisher',
+        executable='trajectory_publisher_node',
+        name='trajectory_publisher_node',
         parameters=[{
             "trajectory_file": trajectory_file,
             "playback_speed": 1.0,
@@ -119,7 +119,7 @@ def generate_launch_description():
     # Safety monitor node
     safety_node = Node(
         package='robot_control_system',
-        executable='safety_monitor',
+        executable='safety_monitor_node',
         name='safety_monitor',
         parameters=[{
             "max_position_error": 10.0,

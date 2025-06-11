@@ -72,14 +72,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    # Simple trajectory publisher for testing
-    test_trajectory_node = Node(
-        package='rclcpp_components',
-        executable='component_container',
-        name='test_trajectory_container',
-        output='screen'
-    )
-
     return LaunchDescription([
         joint_name_arg,
         can_id_arg,

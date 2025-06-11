@@ -1,0 +1,140 @@
+# Robot Control System Configuration - Optimized for Raspberry Pi 4
+# This configuration is tuned for exceptional performance on RPi4 with RT kernel
+
+# Joint Configuration (unchanged)
+joints:
+  right_hip:
+    can_id: 0x201
+    position_limits: [-180.0, 180.0]  # degrees
+    velocity_limits: [-3800.0, 3800.0]  # units
+    current_limits: [-7.0, 7.0]  # amps
+    temperature_limits: [-40.0, 120.0]  # celsius
+    invert_position: false
+    
+  right_knee:
+    can_id: 0x301
+    position_limits: [-180.0, 180.0]
+    velocity_limits: [-3800.0, 3800.0]
+    current_limits: [-7.0, 7.0]
+    temperature_limits: [-40.0, 120.0]
+    invert_position: false
+    
+  right_ankle:
+    can_id: 0x401
+    position_limits: [-180.0, 180.0]
+    velocity_limits: [-3800.0, 3800.0]
+    current_limits: [-7.0, 7.0]
+    temperature_limits: [-40.0, 120.0]
+    invert_position: true
+    
+  left_hip:
+    can_id: 0x501
+    position_limits: [-180.0, 180.0]
+    velocity_limits: [-3800.0, 3800.0]
+    current_limits: [-7.0, 7.0]
+    temperature_limits: [-40.0, 120.0]
+    invert_position: false
+    
+  left_knee:
+    can_id: 0x601
+    position_limits: [-180.0, 180.0]
+    velocity_limits: [-3800.0, 3800.0]
+    current_limits: [-7.0, 7.0]
+    temperature_limits: [-40.0, 120.0]
+    invert_position: true
+    
+  left_ankle:
+    can_id: 0x701
+    position_limits: [-180.0, 180.0]
+    velocity_limits: [-3800.0, 3800.0]
+    current_limits: [-7.0, 7.0]
+    temperature_limits: [-40.0, 120.0]
+    invert_position: false
+
+# PD Controller Parameters - Optimized for RPi4 ARM processing
+pd_controller:
+  kp: 200.0                    # Reduced for ARM stability
+  kd: 1.2                      # Slightly reduced
+  max_velocity: 3600.0         # Conservative for RPi4
+  velocity_filter_alpha: 0.85  # More filtering for ARM noise
+  derivative_window_size: 8    # Power of 2 for ARM efficiency
+  deadband: 0.15               # Slightly larger for stability
+  use_feedforward: false
+  feedforward_gain: 0.0
+
+# Safety Monitor Parameters - Conservative for RPi4
+safety:
+  max_position_error: 8.0      # More conservative
+  max_current: 6.0             # Reduced for safety
+  max_temperature: 75.0        # Lower threshold for RPi4 thermal management
+  min_temperature: -15.0
+  max_velocity: 3600.0         # Consistent with PD controller
+  watchdog_timeout: 0.3        # Shorter for faster response
+  auto_reset: false
+  reset_delay: 1.5
+
+# CAN Configuration - Optimized for RPi4
+can:
+  interface: "can0"
+  bitrate: 1000000
+  tx_queue_length: 2000        # Larger for burst performance
+  restart_ms: 50               # Faster restart for RPi4
+  rx_buffer_size: 65536        # 64KB for burst handling
+  tx_buffer_size: 32768        # 32KB for transmission
+
+# Trajectory Publisher Configuration - RPi4 optimized
+trajectory:
+  publish_rate: 400.0          # Reduced from 500Hz for RPi4 stability
+  interpolate: true
+  time_column_scale: 0.001
+  buffer_size: 1000            # Pre-allocate trajectory buffer
+
+# System Configuration - RPi4 specific
+system:
+  use_real_time_priority: true
+  control_loop_rate: 400.0     # Reduced from 500Hz for stability
+  enable_logging: true
+  log_level: "info"
+  log_frequency_divider: 2000  # Log every 5 seconds at 400Hz
+  
+  # RPi4 specific settings
+  cpu_affinity:
+    reception_nodes: [1]       # Core 1 for I/O
+    pd_controllers: [2]        # Core 2 for control
+    command_senders: [3]       # Core 3 for output
+    trajectory_publisher: [0]  # Core 0 for trajectory (with OS)
+  
+  memory_optimization:
+    lock_memory: true          # Lock memory to prevent swapping
+    cache_alignment: 64        # ARM cache line size
+    preallocate_buffers: true
+  
+  thermal_management:
+    enable_monitoring: true
+    throttle_temp: 75.0        # Start throttling at 75°C
+    shutdown_temp: 85.0        # Emergency shutdown at 85°C
+  
+  performance_monitoring:
+    enable_latency_tracking: true
+    latency_warning_threshold: 1000  # μs
+    cpu_usage_warning: 80.0          # %
+
+# Network Configuration for RPi4
+network:
+  ros_domain_id: 42
+  middleware_profile: "rpi4_optimized"
+  
+# Hardware specific optimizations
+hardware:
+  platform: "raspberry_pi_4"
+  architecture: "aarch64"
+  optimization_level: "high_performance"
+  
+  # GPIO and peripheral settings
+  gpio_priority: "high"
+  usb_optimization: true
+  ethernet_optimization: false  # Usually not used for CAN
+  
+  # Power management
+  cpu_governor: "performance"
+  gpu_mem_split: 64            # Minimal GPU memory for more system RAM

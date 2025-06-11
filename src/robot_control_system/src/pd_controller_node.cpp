@@ -7,6 +7,12 @@
 #include <algorithm>
 #include <deque>
 #include <numeric>
+#include <array>
+#include <unistd.h>
+#include <cerrno>
+#include <sched.h>
+#include <pthread.h>
+#include <sys/mman.h>
 
 using std::placeholders::_1;
 using std::placeholders::_2;
@@ -30,7 +36,8 @@ public:
         this->get_parameter("kd", kd_);
         this->get_parameter("max_velocity", max_velocity_);
         this->get_parameter("velocity_filter_alpha", filter_alpha_);
-        this->get_parameter("derivative_window_size", derivative_window_size_);
+        // derivative_window_size_ is now a compile-time constant for ARM optimization
+        // this->get_parameter("derivative_window_size", derivative_window_size_);
         this->get_parameter("deadband", deadband_);
         this->get_parameter("use_feedforward", use_feedforward_);
         this->get_parameter("feedforward_gain", feedforward_gain_);
@@ -58,9 +65,9 @@ public:
         derivative_pub_ = this->create_publisher<std_msgs::msg::Float64>(
             "/pd_derivative/" + joint_name_, 10);
 
-        // Initialize derivative filter window
-        position_history_.resize(derivative_window_size_);
-        time_history_.resize(derivative_window_size_);
+        // Initialize ARM-optimized derivative filter arrays
+        position_history_.fill(0.0);
+        time_history_.fill(0.0);
 
         RCLCPP_INFO(this->get_logger(), 
             "[%s] PD Controller initialized - Kp: %.1f, Kd: %.3f, Max Vel: %.1f", 
@@ -155,9 +162,9 @@ private:
         last_desired_valid_ = true;
         last_velocity_command_ = filtered_velocity_;
 
-        // Log every N iterations for debugging
-        if (++log_counter_ % 500 == 0) {
-            RCLCPP_INFO(this->get_logger(), 
+        // Log every 5 seconds for debugging (reduce logging overhead)
+        if (++log_counter_ % 2500 == 0) {
+            RCLCPP_DEBUG(this->get_logger(), 
                 "[%s] Pos: %.2f->%.2f, Err: %.3f, Vel: %.1f (P:%.1f D:%.1f FF:%.1f)",
                 joint_name_.c_str(), current_pos, desired_pos, error, 
                 filtered_velocity_, p_term, d_term, ff_term);
@@ -165,26 +172,28 @@ private:
     }
 
     double calculateFilteredDerivative() {
-        // Use least squares to fit a line through position history
-        // This is more robust to noise than simple finite differences
+        // Use simple finite difference with low-pass filtering
+        // Much more efficient than least squares for real-time control
         
-        double sum_t = 0.0, sum_p = 0.0, sum_tt = 0.0, sum_tp = 0.0;
-        int n = derivative_window_size_;
-        
-        for (int i = 0; i < n; ++i) {
-            sum_t += time_history_[i];
-            sum_p += position_history_[i];
-            sum_tt += time_history_[i] * time_history_[i];
-            sum_tp += time_history_[i] * position_history_[i];
+        if (history_index_ < 2) {
+            return 0.0;  // Need at least 2 points
         }
         
-        double denominator = n * sum_tt - sum_t * sum_t;
-        if (std::abs(denominator) < 1e-10) {
-            return 0.0;  // Avoid division by zero
+        // Get the two most recent points
+        int current_idx = (history_index_ - 1) % derivative_window_size_;
+        int prev_idx = (history_index_ - 2) % derivative_window_size_;
+        
+        double dt = time_history_[current_idx] - time_history_[prev_idx];
+        if (dt < 1e-6) {
+            return filtered_derivative_;  // Return last value if dt too small
         }
         
-        // Slope of the fitted line is the derivative
-        return (n * sum_tp - sum_t * sum_p) / denominator;
+        double raw_derivative = (position_history_[current_idx] - position_history_[prev_idx]) / dt;
+        
+        // Apply low-pass filter to reduce noise
+        filtered_derivative_ = filter_alpha_ * filtered_derivative_ + (1.0 - filter_alpha_) * raw_derivative;
+        
+        return filtered_derivative_;
     }
 
     double applyRateLimiting(double velocity) {
@@ -213,10 +222,10 @@ private:
     bool use_feedforward_ = false;
     double feedforward_gain_ = 0.0;
     
-    // Derivative calculation
-    int derivative_window_size_ = 5;
-    std::vector<double> position_history_;
-    std::vector<double> time_history_;
+    // ARM-optimized derivative calculation with cache-friendly access
+    static const int derivative_window_size_ = 8;  // Power of 2 for ARM efficiency
+    alignas(64) std::array<double, derivative_window_size_> position_history_{};  // Cache-aligned
+    alignas(64) std::array<double, derivative_window_size_> time_history_{};     // Cache-aligned
     int history_index_ = 0;
     bool initialized_ = false;
     
@@ -226,6 +235,7 @@ private:
     bool last_desired_valid_ = false;
     double last_velocity_command_ = 0.0;
     double filtered_velocity_ = 0.0;
+    double filtered_derivative_ = 0.0;
     int log_counter_ = 0;
 
     // ROS interfaces
@@ -245,12 +255,40 @@ private:
 int main(int argc, char **argv) {
     rclcpp::init(argc, argv);
     
-    // Set up real-time scheduling
-    struct sched_param param;
-    param.sched_priority = 80;
-    if (sched_setscheduler(0, SCHED_FIFO, &param) == -1) {
-        RCLCPP_WARN(rclcpp::get_logger("pd_controller"), 
-            "Failed to set real-time priority. Performance may be affected.");
+    // Optimize for Raspberry Pi 4 performance
+    if (getuid() == 0) {
+        // Lock memory to prevent swapping (critical for RT performance)
+        if (mlockall(MCL_CURRENT | MCL_FUTURE) == -1) {
+            RCLCPP_WARN(rclcpp::get_logger("pd_controller"), 
+                "Failed to lock memory (errno: %d). Performance may be affected.", errno);
+        } else {
+            RCLCPP_INFO(rclcpp::get_logger("pd_controller"), "Memory locked for real-time operation");
+        }
+        
+        // Set CPU affinity to core 2 (less system interrupts than core 0/1)
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(2, &cpuset);  // Use core 2 for PD controllers
+        
+        if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0) {
+            RCLCPP_WARN(rclcpp::get_logger("pd_controller"), "Failed to set CPU affinity");
+        } else {
+            RCLCPP_INFO(rclcpp::get_logger("pd_controller"), "CPU affinity set to core 2");
+        }
+        
+        // Set real-time priority (lower for RPi4 to prevent system lockup)
+        struct sched_param param;
+        param.sched_priority = 50;  // Reduced for RPi4 stability
+        if (sched_setscheduler(0, SCHED_FIFO, &param) == -1) {
+            RCLCPP_WARN(rclcpp::get_logger("pd_controller"), 
+                "Failed to set real-time priority (errno: %d). Performance may be affected.", errno);
+        } else {
+            RCLCPP_INFO(rclcpp::get_logger("pd_controller"), 
+                "Real-time priority set successfully (priority: %d)", param.sched_priority);
+        }
+    } else {
+        RCLCPP_DEBUG(rclcpp::get_logger("pd_controller"), 
+            "Not running as root, skipping real-time optimizations");
     }
     
     rclcpp::spin(std::make_shared<PDControllerNode>());

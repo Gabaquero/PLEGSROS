@@ -31,7 +31,7 @@ public:
     this->get_parameter("time_column_scale", time_scale_);
 
     // Load trajectory file
-    std::string package_share = ament_index_cpp::get_package_share_directory("trajectory_publisher_node");
+    std::string package_share = ament_index_cpp::get_package_share_directory("robot_control_system");
     std::string file_path = package_share + "/trajectory/" + file_name;
     
     if (!loadCSV(file_path)) {

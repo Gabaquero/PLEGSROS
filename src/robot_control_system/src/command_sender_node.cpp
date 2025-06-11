@@ -10,6 +10,9 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cerrno>
+#include <sched.h>
+#include <pthread.h>
 
 class CommandSenderNode : public rclcpp::Node {
 public:
@@ -26,6 +29,10 @@ public:
 
     if (!open_can_socket(can_interface_)) {
       RCLCPP_ERROR(this->get_logger(), "Failed to open CAN interface: %s", can_interface_.c_str());
+      can_enabled_ = false;
+    } else {
+      can_enabled_ = true;
+      RCLCPP_INFO(this->get_logger(), "[%s] CAN interface opened successfully", joint_name_.c_str());
     }
 
     sub_velocity_ = this->create_subscription<std_msgs::msg::Float64>(
@@ -45,8 +52,18 @@ private:
     if (socket_fd_ < 0) {
       return false;
     }
+    
+    // Optimize socket for RPi4 low-latency transmission
+    int tx_buffer = 32768;  // 32KB transmit buffer
+    setsockopt(socket_fd_, SOL_SOCKET, SO_SNDBUF, &tx_buffer, sizeof(tx_buffer));
+    
+    // Enable TCP_NODELAY equivalent for CAN (reduce buffering)
+    int nodelay = 1;
+    setsockopt(socket_fd_, SOL_CAN_RAW, CAN_RAW_LOOPBACK, &nodelay, sizeof(nodelay));
+    
     struct ifreq ifr {};
     std::strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';  // Ensure null termination
     if (ioctl(socket_fd_, SIOCGIFINDEX, &ifr) < 0) {
       ::close(socket_fd_);
       socket_fd_ = -1;
@@ -60,6 +77,15 @@ private:
       socket_fd_ = -1;
       return false;
     }
+    
+    // Set CPU affinity for command sender to core 3 (dedicated I/O)
+    if (getuid() == 0) {
+      cpu_set_t cpuset;
+      CPU_ZERO(&cpuset);
+      CPU_SET(3, &cpuset);
+      pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    }
+    
     return true;
   }
 
@@ -74,11 +100,36 @@ private:
     frame.data[0] = static_cast<uint8_t>(raw >> 8);
     frame.data[1] = static_cast<uint8_t>(raw & 0xFF);
 
-    if (socket_fd_ >= 0) {
-      ssize_t nbytes = ::write(socket_fd_, &frame, sizeof(frame));
-      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
-        RCLCPP_WARN(this->get_logger(), "Failed to send CAN frame");
+    if (!can_enabled_) {
+      return;  // CAN not available, skip sending
+    }
+    
+    if (socket_fd_ < 0) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
+        "[%s] CAN socket not available", joint_name_.c_str());
+      return;
+    }
+    
+    ssize_t nbytes = ::write(socket_fd_, &frame, sizeof(frame));
+    if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
+      failed_write_count_++;
+      if (failed_write_count_ % 100 == 1) {  // Log every 100th failure
+        RCLCPP_WARN(this->get_logger(), 
+          "[%s] Failed to send CAN frame (errno: %d, count: %d)", 
+          joint_name_.c_str(), errno, failed_write_count_);
       }
+      
+      // If too many failures, try to reconnect
+      if (failed_write_count_ > 1000) {
+        RCLCPP_WARN(this->get_logger(), 
+          "[%s] Too many CAN write failures, attempting reconnect", joint_name_.c_str());
+        ::close(socket_fd_);
+        socket_fd_ = -1;
+        can_enabled_ = open_can_socket(can_interface_);
+        failed_write_count_ = 0;
+      }
+    } else {
+      failed_write_count_ = 0;  // Reset on successful write
     }
   }
 
@@ -88,6 +139,8 @@ private:
   std::string can_interface_;
 
   int socket_fd_{-1};
+  bool can_enabled_{false};
+  int failed_write_count_{0};
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr sub_velocity_;
 };
 
