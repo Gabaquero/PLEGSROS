@@ -1,0 +1,92 @@
+# Robot Control System Configuration
+
+# Joint Configuration
+joints:
+  right_hip:
+    can_id: 0x201
+    position_limits: [-180.0, 180.0]  # degrees
+    velocity_limits: [-3800.0, 3800.0]  # units
+    current_limits: [-7.0, 7.0]  # amps
+    temperature_limits: [-40.0, 120.0]  # celsius
+    invert_position: false
+    
+  right_knee:
+    can_id: 0x301
+    position_limits: [-180.0, 180.0]
+    velocity_limits: [-3800.0, 3800.0]
+    current_limits: [-7.0, 7.0]
+    temperature_limits: [-40.0, 120.0]
+    invert_position: false
+    
+  right_ankle:
+    can_id: 0x401
+    position_limits: [-180.0, 180.0]
+    velocity_limits: [-3800.0, 3800.0]
+    current_limits: [-7.0, 7.0]
+    temperature_limits: [-40.0, 120.0]
+    invert_position: true  # This joint is inverted
+    
+  left_hip:
+    can_id: 0x501
+    position_limits: [-180.0, 180.0]
+    velocity_limits: [-3800.0, 3800.0]
+    current_limits: [-7.0, 7.0]
+    temperature_limits: [-40.0, 120.0]
+    invert_position: false
+    
+  left_knee:
+    can_id: 0x601
+    position_limits: [-180.0, 180.0]
+    velocity_limits: [-3800.0, 3800.0]
+    current_limits: [-7.0, 7.0]
+    temperature_limits: [-40.0, 120.0]
+    invert_position: true  # This joint is inverted
+    
+  left_ankle:
+    can_id: 0x701
+    position_limits: [-180.0, 180.0]
+    velocity_limits: [-3800.0, 3800.0]
+    current_limits: [-7.0, 7.0]
+    temperature_limits: [-40.0, 120.0]
+    invert_position: false
+
+# PD Controller Parameters
+pd_controller:
+  kp: 250.0
+  kd: 1.5
+  max_velocity: 3800.0
+  velocity_filter_alpha: 0.8
+  derivative_window_size: 5
+  deadband: 0.1
+  use_feedforward: false
+  feedforward_gain: 0.0
+
+# Safety Monitor Parameters
+safety:
+  max_position_error: 10.0  # degrees
+  max_current: 6.5  # amps (below 7A limit)
+  max_temperature: 80.0  # celsius
+  min_temperature: -20.0  # celsius
+  max_velocity: 4000.0  # units
+  watchdog_timeout: 0.5  # seconds
+  auto_reset: false
+  reset_delay: 2.0  # seconds
+
+# CAN Configuration
+can:
+  interface: "can0"
+  bitrate: 1000000  # 1 Mbps
+  tx_queue_length: 1000
+
+# Trajectory Publisher Configuration
+trajectory:
+  publish_rate: 500.0  # Hz
+  interpolate: true
+  time_column_scale: 0.001  # Convert ms to seconds
+
+# System Configuration
+system:
+  use_real_time_priority: false
+  control_loop_rate: 500.0  # Hz
+  enable_logging: true
+  log_level: "info"
